@@ -117,6 +117,13 @@ The MoveIt model additionally gains a virtual prismatic joint `pelvis_height_joi
 > [!WARNING]
 > Do **not** activate `upper_body_controller` while SONIC is in control — its arm commands conflict with the whole-body policy. The Inspire hand controllers use separate DDS topics and can be used together with SONIC.
 
+### PICO body with ROS optical hands
+
+To keep PICO body tracking on the official Gear Sonic path while controlling
+only the Inspire hands from ROS, use the hand-only integration in
+[`g1_pico_teleop/README.md`](g1_pico_teleop/README.md). The recommended launch
+does not publish body/SMPL targets and does not manage Gear Sonic state.
+
 ## Running as systemd services (on the robot)
 
 The `etc/` directory mirrors the layout under `/etc` on the robot. `etc/systemd/` holds the unit files that run the stack as services:
