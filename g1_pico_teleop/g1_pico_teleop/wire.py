@@ -33,9 +33,25 @@ _BODY_BYTES = int(np.prod(BODY_SHAPE)) * _FLOAT_DTYPE.itemsize
 _HAND_BYTES = int(np.prod(HAND_SHAPE)) * _FLOAT_DTYPE.itemsize
 DATAGRAM_SIZE = _HEADER.size + _BODY_BYTES + 2 * _HAND_BYTES + _CRC.size
 
+# Single-part ZMQ envelope; compatible G1PT payload, unused body slot all zero.
+OPTICAL_TOPIC = b"G1OH1"
+OPTICAL_HEADER_SIZE = len(OPTICAL_TOPIC) + 16  # publisher session UUID
+OPTICAL_MESSAGE_SIZE = OPTICAL_HEADER_SIZE + DATAGRAM_SIZE
+
 
 class WireError(ValueError):
     """Raised when a frame cannot satisfy the v1 datagram contract."""
+
+
+def decode_optical_message(message: bytes) -> tuple[bytes, PicoUdpFrame]:
+    """Validate the robot's optical-only ZMQ envelope and existing v1 frame."""
+    if len(message) != OPTICAL_MESSAGE_SIZE or not message.startswith(OPTICAL_TOPIC):
+        raise WireError("invalid optical ZMQ envelope length or topic")
+    session = message[len(OPTICAL_TOPIC):OPTICAL_HEADER_SIZE]
+    frame = decode_frame(message[OPTICAL_HEADER_SIZE:])
+    if not any(session) or np.any(frame.body) or not frame.device_timestamp_ns or not frame.source_timestamp_ns:
+        raise WireError("invalid optical session, padding or timestamp")
+    return session, frame
 
 
 def _uint64(value: Any, *, field_name: str) -> int:

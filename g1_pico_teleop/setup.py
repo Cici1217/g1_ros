@@ -19,6 +19,7 @@ setup(
         (f"share/{package_name}/launch", glob("launch/*.launch.py")),
         (f"lib/{package_name}", glob("scripts/pico_xrt_source.py")),
         (f"share/{package_name}/config", glob("config/*")),
+        (f"share/{package_name}/patches", glob("patches/*.patch")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -29,7 +30,7 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "pico_hand_adapter = g1_pico_teleop.hand_ros_adapter_node:main",
+            "pico_hand_adapter = g1_pico_teleop.hand.hand_ros_adapter_node:main",
         ],
     },
 )

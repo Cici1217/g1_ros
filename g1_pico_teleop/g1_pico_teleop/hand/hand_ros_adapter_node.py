@@ -1,9 +1,8 @@
 """Hand-only ROS 2 adapter for PICO OpenXR optical hand tracking.
 
 This node intentionally has no Gear Sonic body imports, publishers, services,
-or state. Body tracking is owned end-to-end by the official PICO manager and
-Gear Sonic deploy process. The body-sized field in the compatible UDP v1
-envelope is ignored.
+or state. Body control is owned by the robot's official manager and SONIC.
+The body-sized field in the compatible UDP v1 envelope is ignored.
 """
 
 from __future__ import annotations
@@ -32,7 +31,10 @@ from .optical import (
     OpticalCalibration,
     OpticalRetargetingError,
 )
-from .wire import DATAGRAM_SIZE, PicoUdpFrame, WireError, decode_frame
+from ..wire import (
+    DATAGRAM_SIZE, OPTICAL_MESSAGE_SIZE, OPTICAL_TOPIC,
+    PicoUdpFrame, WireError, decode_frame, decode_optical_message,
+)
 
 
 _HAND_TOPICS = {
@@ -68,7 +70,7 @@ def _default_calibration_path() -> str:
     try:
         share = Path(get_package_share_directory("g1_pico_teleop"))
     except Exception:
-        share = Path(__file__).resolve().parents[1]
+        share = Path(__file__).resolve().parents[2]
     return str(share / "config" / "pico_native6_calibration.json")
 
 
@@ -111,6 +113,7 @@ class PicoHandAdapter(Node):
         super().__init__("pico_hand_adapter")
         self.declare_parameter("listen_address", "127.0.0.1")
         self.declare_parameter("listen_port", 5570)
+        self.declare_parameter("hand_zmq_endpoint", "")
         self.declare_parameter("publish_rate", 50.0)
         self.declare_parameter("source_timeout", 0.5)
         self.declare_parameter("joint_state_timeout", 0.5)
@@ -145,10 +148,28 @@ class PicoHandAdapter(Node):
             calibration_file
         )
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, DATAGRAM_SIZE * 16)
-        self._socket.setblocking(False)
-        self._socket.bind((self._listen_address, self._listen_port))
+        self._hand_zmq_endpoint = str(self.get_parameter("hand_zmq_endpoint").value).strip()
+        self._zmq_context = None
+        self._zmq = None
+        self._source_session = None
+        if self._hand_zmq_endpoint:
+            import zmq
+            self._zmq = zmq
+            self._zmq_context = zmq.Context()
+            self._socket = self._zmq_context.socket(zmq.SUB)
+            self._socket.setsockopt(zmq.LINGER, 0)
+            self._socket.setsockopt(zmq.RCVHWM, 1)
+            self._socket.setsockopt(zmq.CONFLATE, 1)
+            self._socket.setsockopt(zmq.MAXMSGSIZE, OPTICAL_MESSAGE_SIZE)
+            self._socket.setsockopt(zmq.SUBSCRIBE, OPTICAL_TOPIC)
+            self._socket.connect(self._hand_zmq_endpoint)
+            input_description = f"ZMQ {self._hand_zmq_endpoint}"
+        else:
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, DATAGRAM_SIZE * 16)
+            self._socket.setblocking(False)
+            self._socket.bind((self._listen_address, self._listen_port))
+            input_description = f"udp://{self._listen_address}:{self._listen_port}"
 
         self._latest_frame: PicoUdpFrame | None = None
         self._latest_received_at = 0.0
@@ -176,8 +197,8 @@ class PicoHandAdapter(Node):
         self.create_service(SetBool, "~/enable", self._on_enable)
         self._timer = self.create_timer(1.0 / self._publish_rate, self._on_timer)
         self.get_logger().info(
-            f"Hand-only adapter listening on udp://{self._listen_address}:"
-            f"{self._listen_port} at {self._publish_rate:.1f} Hz; output is disabled; "
+            f"Hand-only adapter receiving {input_description} "
+            f"at {self._publish_rate:.1f} Hz; output is disabled; "
             f"calibration={calibration_file}"
         )
 
@@ -272,6 +293,45 @@ class PicoHandAdapter(Node):
             self._latest_frame = frame
             self._latest_received_at = time.monotonic()
 
+    def _drain_zmq(self) -> None:
+        # Bounded work per ROS tick; the socket keeps only the newest message.
+        for _ in range(16):
+            try:
+                message = self._socket.recv(flags=self._zmq.DONTWAIT)
+            except self._zmq.Again:
+                return
+            except self._zmq.ZMQError as exc:
+                self._disable_outputs(f"optical ZMQ receive failed: {exc}")
+                self._latest_frame = None
+                return
+            try:
+                session, frame = decode_optical_message(message)
+            except WireError as exc:
+                self._latest_frame = None
+                self._disable_outputs("invalid optical ZMQ frame")
+                self._log_throttled("warning", "bad_zmq", f"Rejected optical frame: {exc}")
+                continue
+            if session != self._source_session:
+                if self._source_session is not None:
+                    self._disable_outputs("optical source restarted; enable again")
+                self._source_session = session
+                self._latest_frame = None
+                self._last_sequence = -1
+                self._last_device_timestamp_ns = -1
+                self._last_source_timestamp_ns = -1
+                self.get_logger().info("Receiving optical hands from robot manager")
+            if (frame.sequence <= self._last_sequence
+                    or frame.device_timestamp_ns <= self._last_device_timestamp_ns
+                    or frame.source_timestamp_ns <= self._last_source_timestamp_ns):
+                self._latest_frame = None
+                self._disable_outputs("non-monotonic optical source; enable again")
+                continue
+            self._last_sequence = frame.sequence
+            self._last_device_timestamp_ns = frame.device_timestamp_ns
+            self._last_source_timestamp_ns = frame.source_timestamp_ns
+            self._latest_frame = frame
+            self._latest_received_at = time.monotonic()
+
     def _measured_native6(self, side: str, now: float) -> np.ndarray | None:
         if now - self._joint_state_received_at > self._joint_state_timeout:
             return None
@@ -350,7 +410,14 @@ class PicoHandAdapter(Node):
         self._last_hand_command_at = now
 
     def _on_timer(self) -> None:
-        self._drain_udp()
+        if self._hand_zmq_endpoint:
+            # Check expiry before accepting a reconnect's packet.
+            if (self._latest_received_at > 0.0
+                    and time.monotonic() - self._latest_received_at > self._source_timeout):
+                self._disable_outputs("PICO hand source stale")
+            self._drain_zmq()
+        else:
+            self._drain_udp()
         now = time.monotonic()
         if self._requested_enabled and not self._outputs_enabled:
             if self._latest_frame is None or now - self._latest_received_at > self._source_timeout:
@@ -376,6 +443,8 @@ class PicoHandAdapter(Node):
     def destroy_node(self) -> bool:
         self._disable_outputs("node shutdown")
         self._socket.close()
+        if self._zmq_context is not None:
+            self._zmq_context.term()
         return super().destroy_node()
 
 

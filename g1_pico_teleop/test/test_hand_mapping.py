@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from g1_pico_teleop.hand_command import HandCommandError, make_jtc_command
-from g1_pico_teleop.optical import (
+from g1_pico_teleop.hand.hand_command import HandCommandError, make_jtc_command
+from g1_pico_teleop.hand.optical import (
     NATIVE6_UPPER,
     OpticalCalibration,
     OpticalRetargetingError,
