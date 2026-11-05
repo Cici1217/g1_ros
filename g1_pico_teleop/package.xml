@@ -4,10 +4,8 @@
   <name>g1_pico_teleop</name>
   <version>0.1.0</version>
   <description>PICO optical-hand adapter for the G1 ROS 2 stack</description>
-  <maintainer email="maintainer@example.com">G1 Pico Teleop maintainers</maintainer>
+  <maintainer email="x-chen@jsk.imi.i.u-tokyo.ac.jp">Xi Chen</maintainer>
   <license>BSD-3-Clause</license>
-
-  <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>builtin_interfaces</exec_depend>
