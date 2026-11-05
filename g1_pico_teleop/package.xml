@@ -7,8 +7,6 @@
   <maintainer email="maintainer@example.com">G1 Pico Teleop maintainers</maintainer>
   <license>BSD-3-Clause</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>builtin_interfaces</exec_depend>
   <exec_depend>launch</exec_depend>
